@@ -3,6 +3,7 @@ package runconfig
 import (
 	"fmt"
 	"io/ioutil"
+	"net"
 	"path"
 	"strconv"
 	"strings"
@@ -23,6 +24,8 @@ var (
 	ErrConflictNetworkHostname            = fmt.Errorf("Conflicting options: -h and the network mode (--net)")
 	ErrConflictHostNetworkAndLinks        = fmt.Errorf("Conflicting options: --net=host can't be used with links. This would result in undefined behavior.")
 	ErrConflictRestartPolicyAndAutoRemove = fmt.Errorf("Conflicting options: --restart and --rm")
+	ErrConflictIpAndLinks                 = fmt.Errorf("Conflicting options: --ipv4 or --ipv6 can't be used with links. This would result in undefined behavior.")
+	ErrConflictIpAndPublish               = fmt.Errorf("Conflicting options: --ipv4 or --ipv6 can't be used with published ports.")
 )
 
 //FIXME Only used in tests
@@ -56,6 +59,7 @@ func parseRun(cmd *flag.FlagSet, args []string, sysInfo *sysinfo.SysInfo) (*Conf
 		flEnvFile     = opts.NewListOpts(nil)
 		flCapAdd      = opts.NewListOpts(nil)
 		flCapDrop     = opts.NewListOpts(nil)
+		flIpv4        = opts.NewListOpts(nil)
 
 		flAutoRemove      = cmd.Bool([]string{"#rm", "-rm"}, false, "Automatically remove the container when it exits (incompatible with -d)")
 		flDetach          = cmd.Bool([]string{"d", "-detach"}, false, "Detached mode: run container in the background and print new container ID")
@@ -96,6 +100,8 @@ func parseRun(cmd *flag.FlagSet, args []string, sysInfo *sysinfo.SysInfo) (*Conf
 	cmd.Var(&flCapAdd, []string{"-cap-add"}, "Add Linux capabilities")
 	cmd.Var(&flCapDrop, []string{"-cap-drop"}, "Drop Linux capabilities")
 
+	cmd.Var(&flIpv4, []string{"-ipv4"}, "Configures an IPv4 Interface for the container. Format is \"[<interface-name>=][<bridge-name>:]<ipv4-address>/<netmask>[,<default-route>];...\".")
+
 	if err := cmd.Parse(args); err != nil {
 		return nil, nil, cmd, err
 	}
@@ -116,12 +122,82 @@ func parseRun(cmd *flag.FlagSet, args []string, sysInfo *sysinfo.SysInfo) (*Conf
 		return nil, nil, cmd, ErrConflictDetachAutoRemove
 	}
 
-	if *flNetMode != "bridge" && *flNetMode != "none" && *flHostname != "" {
-		return nil, nil, cmd, ErrConflictNetworkHostname
-	}
+	//
+	// Networking. Here we go.
+	//
 
-	if *flNetMode == "host" && flLinks.Len() > 0 {
-		return nil, nil, cmd, ErrConflictHostNetworkAndLinks
+	if flIpv4.Len() > 0 {
+		if flLinks.Len() > 0 {
+			return nil, nil, cmd, ErrConflictIpAndLinks
+		}
+
+		if flPublish.Len() > 0 || *flPublishAll {
+			return nil, nil, cmd, ErrConflictIpAndPublish
+		}
+
+		for _, i := range flIpv4.GetAll() {
+			ipv4Ints := strings.Split(strings.TrimSpace(i), ";")
+			for _, j := range ipv4Ints {
+				ipConfig := &IpConfig{}
+
+				// [<interface>=]...stanza...
+				ifaceStanza := strings.SplitN(strings.TrimSpace(j), "=", 2)
+				if (len(ifaceStanza) > 1) {
+					ipConfig.Interface = ifaceStanza[0]
+				}
+
+				// [<bridge>:]...stanza...
+				nextValue := strings.TrimSpace(ifaceStanza[len(ifaceStanza)-1])
+				bridgeStanza := strings.SplitN(nextValue, ":", 2)
+				if (len(bridgeStanza) > 1) {
+					ipConfig.Bridge = bridgeStanza[0]
+				}
+
+				nextValue = strings.TrimSpace(bridgeStanza[len(bridgeStanza)-1])
+				if strings.HasPrefix(nextValue, "dhcp") {
+					ipConfig.Dhcp = true
+					dhcpStanza := strings.SplitN(nextValue, "-", 2)
+					if (len(dhcpStanza) > 1) {
+						ipConfig.DhcpIdentifier = dhcpStanza[1]
+					}
+				} else {
+					// <ip-addr>[/netmask][,default-route]
+					routeStanza := strings.Split(nextValue, ",")
+					if (len(routeStanza) > 1) {
+						ipConfig.DefaultRoute = routeStanza[1]
+					}
+				
+					// <ip-addr>[/netmask]
+					nextValue = strings.TrimSpace(routeStanza[0])
+					if strings.index(nextValue, "/") == -1 {
+						if ip, err := net.ParseIP(nextValue); err != nil {
+							return nil, nil, cmd, err
+						} else {
+							ipConfig.Address = ip
+						}
+					} else {
+						if ip, ipnet, err := net.ParseCIDR(nextValue); err != nil {
+							return nil, nil, cmd, err
+						} else {
+							ipConfig.Address = ip
+							ipConfig.Netmask = ipnet.Mask
+						}
+					}
+				}
+
+				fmt.Printf("%V\n", ipConfig)
+			}
+		}
+
+	} else {
+
+		if *flNetMode != "bridge" && *flNetMode != "none" && *flHostname != "" {
+			return nil, nil, cmd, ErrConflictNetworkHostname
+		}
+		
+		if *flNetMode == "host" && flLinks.Len() > 0 {
+			return nil, nil, cmd, ErrConflictHostNetworkAndLinks
+		}
 	}
 
 	// If neither -d or -a are set, attach to everything by default

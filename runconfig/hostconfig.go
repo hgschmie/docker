@@ -1,6 +1,7 @@
 package runconfig
 
 import (
+	"net"
 	"strings"
 
 	"github.com/docker/docker/engine"
@@ -46,6 +47,16 @@ type HostConfig struct {
 	CapAdd          []string
 	CapDrop         []string
 	RestartPolicy   RestartPolicy
+}
+
+type IpConfig struct {
+	Bridge string
+	Interface string
+	Address net.IP
+	Netmask net.IPMask
+	DefaultRoute string
+	Dhcp bool
+	DhcpIdentifier string
 }
 
 func ContainerHostConfigFromJob(job *engine.Job) *HostConfig {
